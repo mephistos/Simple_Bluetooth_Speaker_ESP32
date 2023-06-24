@@ -88,19 +88,15 @@ NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> strip(PixelCount, PixelPin);
 
 //Contacts
 #define PA      GPIO_NUM_21      // Amp power ON
-#ifdef muse
-#define AUXD    GPIO_NUM_27      // AUX In detect 27
-#else
-#define AUXD    GPIO_NUM_12
-#endif
+#define GAIN    GPIO_NUM_23
 #define SDD     GPIO_NUM_34      // Sd detect
 
 //Buttons
 
 #ifdef muse
-#define MU GPIO_NUM_12      // Pause/Play
-#define VM GPIO_NUM_32      // Vol-
-#define VP GPIO_NUM_19     // Vol+ 
+#define MU GPIO_NUM_32      // Pause/Play
+#define VM GPIO_NUM_4      // Vol-
+#define VP GPIO_NUM_18     // Vol+ 
 #else
 #define MU  GPIO_NUM_36    // Pause/Play
 #define VM  GPIO_NUM_39   // Vol-
@@ -122,7 +118,7 @@ bool mute = false;
 uint8_t vfwd = 0;
 bool dofwd = false;
 bool dobck = false;
-uint8_t  vauxd, vsdd;
+uint8_t  vsdd;
 
 int vol, oldVol;
 int mode = btM;
@@ -155,8 +151,8 @@ const i2s_config_t i2s_configR = {
       .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX), // Receive, transfer
       .sample_rate = 44100,                         // 
       .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, // 
-      .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, //
-      .communication_format = I2S_COMM_FORMAT_I2S,
+      .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, //
+      .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL2,     // Interrupt level 1
       .dma_buf_count = 4,                           // number of buffers
 
@@ -165,10 +161,10 @@ const i2s_config_t i2s_configR = {
   
       i2s_pin_config_t pin_configR=
       {
-      .bck_io_num = 5 ,    // BCKL
-      .ws_io_num = 25 ,    // LRCL
-      .data_out_num = 26,  // DOUT
-      .data_in_num = 35    // DIN
+      .bck_io_num = I2S_BCLK,    // BCKL
+      .ws_io_num = I2S_LRC,    // LRCL
+      .data_out_num = I2S_DOUT,  // DOUT
+      .data_in_num = I2S_DIN    // DIN
       };
 /////////////////////////////////////////////////////////////////////////////////////////
 //   FACTORY TEST
@@ -657,7 +653,7 @@ void playWav(char* n)
 /////////////////////////////////////////////////////////////////////
 // beep....
 /////////////////////////////////////////////////////////////////////
-void beep(void)
+/*void beep(void)
 {
 #define volBeep 15
   ES8388vol_Set(volBeep);
@@ -667,6 +663,7 @@ void beep(void)
   ES8388vol_Set(vol);
   i2s_set_clk(I2SN, sampleRate, (i2s_bits_per_sample_t)16, (i2s_channel_t)2);
 }
+*/
 
 //////////////////////////////////////////////////////////////////////
 // annonce tiny messages (2-3 sec) (mode name)
@@ -1027,16 +1024,30 @@ static int ec0=0, ec1=0, ec2=0;
 #define NYELLOW 1800
 static void battery(void* pdata)
 {
-  int val;
+  int val, sum;
+  
+  val = adc1_get_raw(ADC1_GPIO33_CHANNEL);
+  printf("Battery : %d\n", val);
+  if(val < NYELLOW) strip.SetPixelColor(0, RED);
+  else if(val > NGREEN) strip.SetPixelColor(0, GREEN);
+  else strip.SetPixelColor(0, YELLOW);
+  strip.Show();   
+  
   while(1)
   {
-   val = adc1_get_raw(ADC1_GPIO33_CHANNEL);
-   printf("Battery : %d\n");
+   for (int i = 0; i < 100; i++)
+    {
+        sum += adc1_get_raw(ADC1_GPIO33_CHANNEL);
+        delay(250);
+    }
+   val = sum / 100;
+   sum = 0;
+   printf("Battery : %d\n", val);
    if(val < NYELLOW) strip.SetPixelColor(0, RED);
    else if(val > NGREEN) strip.SetPixelColor(0, GREEN);
    else strip.SetPixelColor(0, YELLOW);
    strip.Show();   
-   delay(10000);
+   delay(35000);
   }
 }
 
@@ -1160,7 +1171,7 @@ void setup()
 {
 
   Serial.begin(115200);
-  hal_i2c_init(0, SDA, SCL);
+  // hal_i2c_init(0, SDA, SCL); // genere des erreurs mais meilleur son et pas de saute bizarre quand change de volume en BT
   esp_err_t err;
   //err = nvs_flash_init();
  // if (err != ESP_OK) printf("nvs flash error...\n");
@@ -1182,7 +1193,6 @@ void setup()
   // power enable
   gpio_reset_pin(PA);
   gpio_set_direction(PA, GPIO_MODE_OUTPUT);
-
  
   //VP
   gpio_reset_pin(VP);
@@ -1195,11 +1205,6 @@ void setup()
   gpio_set_direction(VM, GPIO_MODE_INPUT);
   gpio_set_pull_mode(VM, GPIO_PULLUP_ONLY);
 
-  // AUX detect
-  gpio_reset_pin(AUXD);
-  gpio_set_direction(AUXD, GPIO_MODE_INPUT);
-  // gpio_set_pull_mode(AUXD, GPIO_PULLUP_ONLY);
-
   // SD detect
   gpio_reset_pin(SDD);
   gpio_set_direction(SDD, GPIO_MODE_INPUT);
@@ -1210,9 +1215,8 @@ void setup()
   gpio_set_direction(MU, GPIO_MODE_INPUT);
   gpio_set_pull_mode(MU, GPIO_PULLUP_ONLY);
 
-  // Store SD detect and AUX detect initial values
+  // Store SD detect initial values
   vsdd = gpio_get_level(SDD);
-  vauxd = gpio_get_level(AUXD);
  
 
 
@@ -1253,11 +1257,16 @@ void setup()
   ES8388_Init();
   /////////////////////////////////////////////////////////////////
 
+  // set amp gain
+  gpio_set_pull_mode(GAIN, GPIO_PULLDOWN_ONLY);   // 15dB
+
   ////////////////////////////////////////////////////////////////
   // init i2s
   ////////////////////////////////////////////////////////////////
   hal_i2s_init(I2SN, I2S_DOUT, I2S_LRC, I2S_BCLK, I2S_DIN, 2);
   // init i2s default rates
+  i2s_driver_install(I2SR, &i2s_configR,0,NULL);
+  i2s_set_pin(I2SR, &pin_configR);
   i2s_set_clk(I2SN, 44100, (i2s_bits_per_sample_t)16, (i2s_channel_t)2);
   sampleRate = 44100;
   ////////////////////////////////////////////////////////////////
@@ -1285,7 +1294,7 @@ void setup()
   char dev_name [30];
   esp_read_mac((uint8_t*)&mac, ESP_MAC_WIFI_STA);
   snprintf(macStr, 19, "-%x%x%x", mac[3], mac[4], mac[5]);
-  strcpy(dev_name, "MUSE_SPEAKER");
+  strcpy(dev_name, "MUSICBOX_SIMON");
   strcat(dev_name, macStr);
  // printf("devName ====> %s\n",dev_name);
   esp_bt_dev_set_device_name(dev_name);
@@ -1320,13 +1329,13 @@ void loop() {
   delay(200);
   // forward     (for SD)
   if ((b0 > longK) && (mode == sdM)) {
-    beep();
+    // beep();
     b0 = -1;
     dofwd = true;
   }
   // backward     (for SD)
   if ((b1 > longK) && (mode == sdM)) {
-    beep();
+    // beep();
     b1 = -1;
     dobck = true;
   }
@@ -1336,13 +1345,13 @@ void loop() {
   //
 
   oldVol = vol;
-  if((b0 > 0) && (b0 < longK)) {vol = vol + 4 ;b0 = -1;}
-  if((b1 > 0) && (b1 < longK)) {vol = vol - 4 ;b1 = -1;}
+  if((b0 > 0) && (b0 < longK)) {vol = vol + 5 ;b0 = -1;}
+  if((b1 > 0) && (b1 < longK)) {vol = vol - 5 ;b1 = -1;}
   
   if (vol > maxVol) vol = maxVol;
   if (vol < 0) vol = 0;
   if (vol != oldVol) {
-    beep();
+    // beep();
     ES8388vol_Set(vol); 
   }
 
@@ -1353,7 +1362,7 @@ void loop() {
   {
     if (mute == false)
     {
-      beep();
+      // beep();
       mute = true;
       ES8388_Write_Reg(25, 0x04);
       if (mode == auxM)
@@ -1371,27 +1380,11 @@ void loop() {
         ES8388_Write_Reg(39, 0x40);
         ES8388_Write_Reg(42, 0x40);
       }
-      beep();
+      // beep();
     }
     b2 = -1;
   }
-  
 
-  // AUX in detect
-  if (inc(gpio_get_level(AUXD), &vauxd) == 1)
-   {
-    mode = auxM;
-    if ((mode == auxM) && (auxON == false)) {
-      modeCall();
-      xTaskCreate(aux, "jack", 5000, NULL, 1, NULL);
-      auxON = true;
-    }
-  }
-  vauxd = gpio_get_level(AUXD);
-  if ((vauxd == 1) && (auxON == true)) {
-    mode = btM;
-    modeCall();
-  }
 
   // SD detect
   if (inc(gpio_get_level(SDD), &vsdd) == 1)
